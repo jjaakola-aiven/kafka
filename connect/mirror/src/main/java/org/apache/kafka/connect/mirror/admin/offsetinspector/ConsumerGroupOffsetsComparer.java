@@ -1,0 +1,251 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements. See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.apache.kafka.connect.mirror.admin.offsetinspector;
+
+import org.apache.kafka.clients.consumer.OffsetAndMetadata;
+import org.apache.kafka.common.TopicPartition;
+
+import java.time.Duration;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
+
+public final class ConsumerGroupOffsetsComparer {
+
+    private final Duration operationTimeout;
+    private final Map<String, Map<TopicPartition, OffsetAndMetadata>> sourceConsumerOffsets;
+    private final Map<String, Map<TopicPartition, OffsetAndMetadata>> targetConsumerOffsets = new HashMap<>();
+    private final TopicPartitionCache sourceTopicPartitionCache;
+
+    public ConsumerGroupOffsetsComparer(final Duration operationTimeout, final Map<String, Object> sourceConfiguration,
+                                        final Map<String, Map<TopicPartition, OffsetAndMetadata>> sourceConsumerOffsets,
+                                        final Map<String, Map<TopicPartition, OffsetAndMetadata>> targetConsumerOffsets) {
+        this.operationTimeout = operationTimeout;
+        sourceTopicPartitionCache = new TopicPartitionCache(Objects.requireNonNull(sourceConfiguration));
+        this.targetConsumerOffsets.putAll(Objects.requireNonNull(targetConsumerOffsets));
+        this.sourceConsumerOffsets = Collections.unmodifiableMap(Objects.requireNonNull(sourceConsumerOffsets));
+    }
+
+    public ConsumerGroupsCompareResult compare() {
+        final ConsumerGroupsCompareResult result = new ConsumerGroupsCompareResult();
+
+        sourceConsumerOffsets.forEach((groupId, sourceOffsetData) -> {
+            final Optional<Map<TopicPartition, OffsetAndMetadata>> maybeTargetGroupConsumerOffsets =
+                    Optional.ofNullable(targetConsumerOffsets.remove(groupId));
+            if (maybeTargetGroupConsumerOffsets.isPresent()) {
+                final Map<TopicPartition, OffsetAndMetadata> targetOffsetData = maybeTargetGroupConsumerOffsets.get();
+                sourceOffsetData.forEach((sourceTopicPartition, metadata) -> {
+                    final Optional<OffsetAndMetadata> maybeTargetOffsetAndMetadata = Optional
+                            .ofNullable(targetOffsetData.get(sourceTopicPartition));
+                    final boolean targetOk;
+                    final String message;
+                    if (maybeTargetOffsetAndMetadata.isPresent()) {
+                        final Long targetOffset = Optional.ofNullable(targetOffsetData.get(sourceTopicPartition))
+                                .map(OffsetAndMetadata::offset)
+                                .orElse(null);
+                        if (targetOffset == null) {
+                            // If no target offset, check if source partition is empty.
+                            // If source partition is empty Mirrormaker does not sync offset.
+                            final boolean isEmpty = sourceTopicPartitionCache.isEmpty(sourceTopicPartition,
+                                    operationTimeout);
+                            if (isEmpty) {
+                                targetOk = true;
+                                message = "Source partition is empty, offset not expected to be synced.";
+                            } else {
+                                targetOk = false;
+                                message = "Source partition not empty, offset expected to be synced.";
+                            }
+                        } else {
+                            // Target offset present, assume ok sync.
+                            targetOk = true;
+                            message = "Target has offset sync.";
+                        }
+                        result.addConsumerGroupCompareResult(new ConsumerGroupCompareResult(groupId,
+                                sourceTopicPartition, metadata.offset(), targetOffset, targetOk, message));
+                    } else {
+                        // If no target offset, check if source partition is empty.
+                        // If source partition is empty Mirrormaker does not sync offset.
+                        final boolean isEmpty = sourceTopicPartitionCache.isEmpty(sourceTopicPartition,
+                                operationTimeout);
+                        if (isEmpty) {
+                            targetOk = true;
+                            message = "Target consumer group missing the topic partition. Source partition is empty, offset not expected to be synced.";
+                        } else {
+                            targetOk = false;
+                            message = "Target consumer group missing the topic partition. Source partition not empty, offset expected to be synced.";
+                        }
+                        result.addConsumerGroupCompareResult(
+                                new ConsumerGroupCompareResult(groupId, sourceTopicPartition, metadata.offset(), null,
+                                        targetOk, message));
+                    }
+                });
+            } else {
+                // No group at target, add each partition to result without target offset.
+                sourceOffsetData.forEach((sourceTopicPartition, metadata) -> result
+                        .addConsumerGroupCompareResult(new ConsumerGroupCompareResult(groupId, sourceTopicPartition,
+                                metadata.offset(), null, false, "Target missing the consumer group.")));
+            }
+        });
+
+        // Target consumer offsets map is mutated by remove calls and leaves behind extra groups at target.
+        result.setExtraAtTarget(targetConsumerOffsets);
+        return result;
+    }
+
+    public static ConsumerGroupOffsetsComparerBuilder builder() {
+        return new ConsumerGroupOffsetsComparerBuilder();
+    }
+
+    public static final class ConsumerGroupsCompareResult {
+
+        private Map<String, Map<TopicPartition, OffsetAndMetadata>> extraAtTarget = Collections.emptyMap();
+        private final Collection<ConsumerGroupCompareResult> result = new ArrayList<>();
+
+        private ConsumerGroupsCompareResult() {
+            /* hide constructor */
+        }
+
+        private void addConsumerGroupCompareResult(final ConsumerGroupCompareResult groupResult) {
+            result.add(groupResult);
+        }
+
+        private void setExtraAtTarget(final Map<String, Map<TopicPartition, OffsetAndMetadata>> extraAtTarget) {
+            this.extraAtTarget = extraAtTarget;
+        }
+
+        public Collection<ConsumerGroupCompareResult> getConsumerGroupsCompareResult() {
+            return result;
+        }
+
+        public boolean isEmpty() {
+            return result.isEmpty();
+        }
+
+
+        @Override
+        public String toString() {
+            return "ConsumerGroupsCompareResult{" + "extraAtTarget=" + extraAtTarget + ", result=" + result + '}';
+        }
+    }
+
+    public static final class ConsumerGroupCompareResult {
+        private final String groupId;
+        private final TopicPartition topicPartition;
+        private final Long sourceOffset;
+        private final Long targetOffset;
+        private final boolean groupStateOk;
+        private final String message;
+
+        public ConsumerGroupCompareResult(final String groupId, final TopicPartition topicPartition,
+                                           final Long sourceOffset, final Long targetOffset, final boolean groupStateOk, final String message) {
+            this.groupId = Objects.requireNonNull(groupId);
+            this.topicPartition = topicPartition;
+            this.sourceOffset = sourceOffset;
+            this.targetOffset = targetOffset;
+            this.groupStateOk = groupStateOk;
+            this.message = message;
+        }
+
+        public String getGroupId() {
+            return groupId;
+        }
+
+        public TopicPartition getTopicPartition() {
+            return this.topicPartition;
+        }
+
+        public Long getSourceOffset() {
+            return sourceOffset;
+        }
+
+        public Long getTargetOffset() {
+            return targetOffset;
+        }
+
+        public boolean isOk() {
+            return groupStateOk;
+        }
+
+        public String getMessage() {
+            return message;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) return true;
+            if (o == null || getClass() != o.getClass()) return false;
+            ConsumerGroupCompareResult that = (ConsumerGroupCompareResult) o;
+            return groupStateOk == that.groupStateOk && Objects.equals(groupId, that.groupId) && Objects.equals(topicPartition, that.topicPartition) && Objects.equals(sourceOffset, that.sourceOffset) && Objects.equals(targetOffset, that.targetOffset) && Objects.equals(message, that.message);
+        }
+
+        @Override
+        public int hashCode() {
+            return Objects.hash(groupId, topicPartition, sourceOffset, targetOffset, groupStateOk, message);
+        }
+
+        @Override
+        public String toString() {
+            return "ConsumerGroupCompareResult{" + "groupId='" + groupId + '\'' + ", topicPartition=" + topicPartition
+                    + ", sourceOffset=" + sourceOffset + ", targetOffset=" + targetOffset + ", groupStateOk="
+                    + groupStateOk + ", message='" + message + '\'' + '}';
+        }
+    }
+
+    public static final class ConsumerGroupOffsetsComparerBuilder {
+
+        private Duration operationTimeout = Duration.ofMinutes(1);
+        private Map<String, Object> sourceConfiguration = new HashMap<>();
+        private final Map<String, Map<TopicPartition, OffsetAndMetadata>> sourceConsumerOffsets = new HashMap<>();
+        private final Map<String, Map<TopicPartition, OffsetAndMetadata>> targetConsumerOffsets = new HashMap<>();
+
+        private ConsumerGroupOffsetsComparerBuilder() {
+            /* hide constructor */
+        }
+
+        public ConsumerGroupOffsetsComparerBuilder withOperationTimeout(final Duration operationTimeout) {
+            this.operationTimeout = operationTimeout;
+            return this;
+        }
+
+        public ConsumerGroupOffsetsComparerBuilder withSourceConfiguration(final Map<String, Object> sourceConfiguration) {
+            this.sourceConfiguration = Collections.unmodifiableMap(sourceConfiguration);
+            return this;
+        }
+
+        public ConsumerGroupOffsetsComparerBuilder withSourceConsumerOffsets(
+                final Map<String, Map<TopicPartition, OffsetAndMetadata>> sourceConsumerOffsets) {
+            this.sourceConsumerOffsets.putAll(Objects.requireNonNull(sourceConsumerOffsets));
+            return this;
+        }
+
+        public ConsumerGroupOffsetsComparerBuilder withTargetConsumerOffsets(
+                final Map<String, Map<TopicPartition, OffsetAndMetadata>> targetConsumerOffsets) {
+            this.targetConsumerOffsets.putAll(Objects.requireNonNull(targetConsumerOffsets));
+            return this;
+        }
+
+        public ConsumerGroupOffsetsComparer build() {
+            return new ConsumerGroupOffsetsComparer(operationTimeout, sourceConfiguration, sourceConsumerOffsets,
+                    targetConsumerOffsets);
+        }
+    }
+}
