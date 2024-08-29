@@ -18,12 +18,13 @@
 package org.apache.kafka.connect.mirror.admin.offsetinspector;
 
 import org.apache.kafka.clients.admin.AdminClient;
+import org.apache.kafka.clients.admin.ConsumerGroupDescription;
 import org.apache.kafka.clients.admin.ConsumerGroupListing;
-import org.apache.kafka.clients.admin.KafkaAdminClient;
 import org.apache.kafka.clients.admin.ListConsumerGroupOffsetsOptions;
 import org.apache.kafka.clients.admin.ListConsumerGroupOffsetsResult;
 import org.apache.kafka.clients.admin.ListConsumerGroupOffsetsSpec;
 import org.apache.kafka.clients.consumer.OffsetAndMetadata;
+import org.apache.kafka.common.ConsumerGroupState;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.connect.mirror.GroupFilter;
 import org.apache.kafka.connect.mirror.MirrorCheckpointConfig;
@@ -32,11 +33,10 @@ import org.apache.kafka.connect.mirror.TopicFilter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.io.Closeable;
 import java.time.Duration;
 import java.util.Collection;
-import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.ExecutionException;
@@ -44,81 +44,110 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.stream.Collectors;
 
-public final class ConsumerGroupsStateCollector implements Closeable {
+public final class ConsumerGroupsStateCollector {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(ConsumerGroupsStateCollector.class);
 
-    private final Duration operationTimeout;
-    private final Map<String, Object> configuration;
-    private AdminClient adminClient;
+    private final Duration adminTimeout;
+    private final AdminClient adminClient;
     private final MirrorCheckpointConfig mirrorCheckpointConfig;
+    private final boolean includeInactiveGroups;
 
-    private ConsumerGroupsStateCollector(final Duration operationTimeout,
-                                         final Map<String, Object> configuration,
-                                         final MirrorCheckpointConfig mirrorCheckpointConfig) {
-        this.operationTimeout = Objects.requireNonNull(operationTimeout);
-        this.configuration = Collections.unmodifiableMap(Objects.requireNonNull(configuration));
+    private ConsumerGroupsStateCollector(final Duration adminTimeout,
+                                         final AdminClient adminClient,
+                                         final MirrorCheckpointConfig mirrorCheckpointConfig,
+                                         final boolean includeInactiveGroups
+    ) {
+        this.adminTimeout = Objects.requireNonNull(adminTimeout);
+        this.adminClient = adminClient;
         this.mirrorCheckpointConfig = mirrorCheckpointConfig;
+        this.includeInactiveGroups = includeInactiveGroups;
     }
 
-    private AdminClient getAdminClient() {
-        if (adminClient == null) {
-            adminClient = KafkaAdminClient.create(configuration);
-        }
-        return adminClient;
-    }
-
-    @Override
-    public void close() {
-        if (adminClient != null) {
-            adminClient.close(operationTimeout);
-        }
-    }
-
-    public Map<String, Map<TopicPartition, OffsetAndMetadata>> collectConsumerGroupsState() {
+    public Map<GroupAndState, Map<TopicPartition, OffsetAndMetadata>> collectConsumerGroupsState() {
         final Collection<String> groupIds;
         try (final GroupFilter groupFilter = mirrorCheckpointConfig.groupFilter()) {
-            groupIds = getAdminClient().listConsumerGroups()
+            groupIds = adminClient.listConsumerGroups()
                     .all()
                     .get(timeoutMs(), TimeUnit.MILLISECONDS)
                     .stream()
                     .map(ConsumerGroupListing::groupId)
-                    .filter(groupFilter::shouldReplicateGroup)
+                    .filter(groupId -> {
+                        final boolean shouldReplicate = groupFilter.shouldReplicateGroup(groupId);
+                        LOGGER.debug("Group filter, replicate {} -> {}", groupId, shouldReplicate);
+                        return shouldReplicate;
+                    })
                     .collect(Collectors.toList());
         } catch (InterruptedException | ExecutionException | TimeoutException e) {
             throw new RuntimeException(e);
         }
-        return getCommittedOffsets(groupIds);
+
+        final Collection<GroupAndState> selectedGroupIds = new HashSet<>();
+
+        adminClient.describeConsumerGroups(groupIds).describedGroups().forEach((key, value) -> {
+            try {
+                LOGGER.debug("Describing group {}", key);
+                final ConsumerGroupDescription consumerGroupDescription = value
+                        .get(timeoutMs(), TimeUnit.MILLISECONDS);
+                final ConsumerGroupState groupState = consumerGroupDescription.state();
+                final GroupAndState groupAndState = new GroupAndState(key, groupState);
+                if (includeInactiveGroups) {
+                    selectedGroupIds.add(groupAndState);
+                } else {
+                    switch (groupState) {
+                        case STABLE:
+                        case ASSIGNING:
+                        case RECONCILING:
+                        case PREPARING_REBALANCE:
+                        case COMPLETING_REBALANCE:
+                            selectedGroupIds.add(groupAndState);
+                            return;
+                        default:
+                            LOGGER.debug("Group {} is in state {} and not inspected.", key, groupState);
+                    }
+                }
+            } catch (InterruptedException | ExecutionException | TimeoutException e) {
+                LOGGER.error(String.format("Interrupted when filtering for groups to inspect on %s.", key), e);
+            }
+        });
+
+        LOGGER.debug("Proposed groups: {}", groupIds);
+        LOGGER.debug("Selected groups: {}", selectedGroupIds);
+
+        return getCommittedOffsets(selectedGroupIds);
     }
 
-    private Map<String, Map<TopicPartition, OffsetAndMetadata>> getCommittedOffsets(final Collection<String> groupIds) {
-        final Map<String, ListConsumerGroupOffsetsSpec> groupSpecs = new HashMap<>();
-        final ListConsumerGroupOffsetsSpec emptyConsumerGroupSpecs = new ListConsumerGroupOffsetsSpec();
-        for (final String groupId : groupIds) {
-            if (groupSpecs.put(groupId, emptyConsumerGroupSpecs) != null) {
-                throw new IllegalStateException("Duplicate key");
-            }
-        }
-        final ListConsumerGroupOffsetsResult result = getAdminClient().listConsumerGroupOffsets(groupSpecs,
-                new ListConsumerGroupOffsetsOptions().timeoutMs(timeoutMs()));
-        final Map<String, Map<TopicPartition, OffsetAndMetadata>> groupData = new HashMap<>();
-        for (final String groupId : groupIds) {
-            try (final TopicFilter topicFilter = mirrorCheckpointConfig.topicFilter()) {
+    public Map<GroupAndState, Map<TopicPartition, OffsetAndMetadata>> getCommittedOffsets(final Collection<GroupAndState> groupIdsAndStates) {
+        final Map<GroupAndState, Map<TopicPartition, OffsetAndMetadata>> groupData = new HashMap<>();
+        try (final TopicFilter topicFilter = mirrorCheckpointConfig.topicFilter()) {
+            for (GroupAndState groupAndState : groupIdsAndStates) {
+                final Map<String, ListConsumerGroupOffsetsSpec> groupSpecs = new HashMap<>();
+                groupSpecs.put(groupAndState.id(), new ListConsumerGroupOffsetsSpec());
+                final ListConsumerGroupOffsetsResult result = adminClient.listConsumerGroupOffsets(groupSpecs,
+                        new ListConsumerGroupOffsetsOptions().timeoutMs(timeoutMs()));
                 final Map<TopicPartition, OffsetAndMetadata> filteredTopicPartitionOffsetAndMetadataMap =
-                        result.partitionsToOffsetAndMetadata(groupId).get(timeoutMs(), TimeUnit.MILLISECONDS)
+                        result.partitionsToOffsetAndMetadata(groupAndState.id()).get(timeoutMs(), TimeUnit.MILLISECONDS)
                                 .entrySet().stream()
-                                .filter(entry -> topicFilter.shouldReplicateTopic(entry.getKey().topic()))
+                                .filter(entry -> {
+                                    final String topicName = entry.getKey().topic();
+                                    final boolean shouldReplicateTopic = topicFilter.shouldReplicateTopic(topicName);
+                                    LOGGER.debug("Topic filter, replicate group {} with topic: {} -> {}",
+                                            groupAndState.id(), topicName, shouldReplicateTopic);
+                                    return shouldReplicateTopic;
+                                })
                                 .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
-                groupData.put(groupId, filteredTopicPartitionOffsetAndMetadataMap);
-            } catch (InterruptedException | ExecutionException | TimeoutException e) {
-                LOGGER.error("Interrupted when getting topic partition offsets and metadata.", e);
+                groupData.put(groupAndState, filteredTopicPartitionOffsetAndMetadataMap);
             }
+        } catch (InterruptedException | ExecutionException | TimeoutException e) {
+            LOGGER.error(
+                    String.format("Interrupted or timeout of %s when getting topic partition offsets and metadata.",
+                            adminTimeout), e);
         }
         return groupData;
     }
 
     private int timeoutMs() {
-        return Math.toIntExact(operationTimeout.toMillis());
+        return Math.toIntExact(adminTimeout.toMillis());
     }
 
     public static ConsumerGroupsStateCollectorBuilder builder() {
@@ -126,21 +155,22 @@ public final class ConsumerGroupsStateCollector implements Closeable {
     }
 
     public static final class ConsumerGroupsStateCollectorBuilder {
-        private Duration operationTimeout = Duration.ofMinutes(5);
-        private final Map<String, Object> configuration = new HashMap<>();
+        private Duration adminTimeout = Duration.ofMinutes(1);
+        private AdminClient adminClient;
         private MirrorCheckpointConfig mirrorCheckpointConfig;
+        private boolean includeInactiveGroups = true;
 
         private ConsumerGroupsStateCollectorBuilder() {
             /* hide constructor */
         }
 
-        public ConsumerGroupsStateCollectorBuilder withOperationTimeout(final Duration operationTimeout) {
-            this.operationTimeout = operationTimeout;
+        public ConsumerGroupsStateCollectorBuilder withAdminTimeout(final Duration adminTimeout) {
+            this.adminTimeout = adminTimeout;
             return this;
         }
 
-        public ConsumerGroupsStateCollectorBuilder withAdminClientConfiguration(final Map<String, Object> configuration) {
-            this.configuration.putAll(configuration);
+        public ConsumerGroupsStateCollectorBuilder withAdminClient(final AdminClient adminClient) {
+            this.adminClient = adminClient;
             return this;
         }
 
@@ -150,9 +180,13 @@ public final class ConsumerGroupsStateCollector implements Closeable {
             return this;
         }
 
+        public ConsumerGroupsStateCollectorBuilder includeInactiveGroups(final boolean includeInactiveGroups) {
+            this.includeInactiveGroups = includeInactiveGroups;
+            return this;
+        }
+
         public ConsumerGroupsStateCollector build() {
-            this.configuration.put("default.api.timeout.ms", Math.toIntExact(operationTimeout.toMillis()));
-            return new ConsumerGroupsStateCollector(operationTimeout, configuration, mirrorCheckpointConfig);
+            return new ConsumerGroupsStateCollector(adminTimeout, adminClient, mirrorCheckpointConfig, includeInactiveGroups);
         }
 
     }

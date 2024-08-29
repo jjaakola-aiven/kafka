@@ -269,8 +269,6 @@ public abstract class MirrorConnectorsIntegrationSetupBase {
         }
     }
 
-    // KALA--------------------
-
     protected TopicPartition remoteTopicPartition(TopicPartition tp, String alias) {
         return new TopicPartition(remoteTopicName(tp.topic(), alias), tp.partition());
     }

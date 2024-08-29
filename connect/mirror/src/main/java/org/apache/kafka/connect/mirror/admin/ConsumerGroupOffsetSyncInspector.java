@@ -17,6 +17,8 @@
 
 package org.apache.kafka.connect.mirror.admin;
 
+import org.apache.kafka.clients.admin.AdminClient;
+import org.apache.kafka.clients.admin.KafkaAdminClient;
 import org.apache.kafka.clients.consumer.OffsetAndMetadata;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.utils.Exit;
@@ -28,6 +30,7 @@ import org.apache.kafka.connect.mirror.MirrorMakerConfig;
 import org.apache.kafka.connect.mirror.SourceAndTarget;
 import org.apache.kafka.connect.mirror.admin.offsetinspector.ConsumerGroupOffsetsComparer;
 import org.apache.kafka.connect.mirror.admin.offsetinspector.ConsumerGroupsStateCollector;
+import org.apache.kafka.connect.mirror.admin.offsetinspector.GroupAndState;
 
 import net.sourceforge.argparse4j.ArgumentParsers;
 import net.sourceforge.argparse4j.impl.Arguments;
@@ -51,20 +54,35 @@ import java.util.Properties;
 public final class ConsumerGroupOffsetSyncInspector {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(ConsumerGroupOffsetSyncInspector.class);
-    private static final String CSV_ROW_FORMAT = "%s,%s,%s,%s,%s,%s,%s,%s";
-    private static final String CSV_HEADER_FORMAT = String.format(CSV_ROW_FORMAT, "CLUSTER PAIR", "GROUP", "TOPIC", "PARTITION",
+    private static final String CSV_ROW_FORMAT = "%s,%s,%s,%s,%s,%s,%s,%s,%s";
+    private static final String CSV_HEADER_FORMAT = String.format(CSV_ROW_FORMAT, "CLUSTER PAIR", "GROUP", "GROUP STATE", "TOPIC", "PARTITION",
             "SOURCE OFFSET", "TARGET OFFSET", "IS OK", "MESSAGE");
 
     public static void main(final String[] args) throws IOException {
         final ArgumentParser parser = ArgumentParsers.newArgumentParser("mirror-maker-consumer-group-offset-sync-inspector");
         parser.description("MirrorMaker 2.0 consumer group offset sync inspector");
         parser.addArgument("--mm2-config").type(Arguments.fileType().verifyCanRead())
-                .metavar("mm2.properties").required(true)
+                .metavar("mm2.properties")
+                .required(true)
                 .help("MM2 configuration file.");
 
         parser.addArgument("--output-path").type(Arguments.fileType().verifyCanCreate())
                 .required(false)
                 .help("The result CSV file output path. If not given the result is printed to console.");
+
+        parser.addArgument("--admin-timeout").type((argumentParser, argument, value) -> Duration.parse(value))
+                .required(false)
+                .setDefault(Duration.ofSeconds(60))
+                .help("Kafka API operation timeout in ISO duration format. Defaults to PT1M.");
+        parser.addArgument("--request-timeout").type((argumentParser, argument, value) -> Duration.parse(value))
+                .required(false)
+                .setDefault(Duration.ofSeconds(30))
+                .help("Kafka API request timeout in ISO duration format. Defaults to PT30S.");
+
+        parser.addArgument("--include-inactive-groups")
+                .required(false)
+                .help("Inspect also inactive (empty/dead) consumer groups.")
+                .action(Arguments.storeTrue());
 
         final Namespace ns;
         try {
@@ -78,11 +96,22 @@ public final class ConsumerGroupOffsetSyncInspector {
         final File mm2ConfigFile = ns.get("mm2_config");
         final Properties mm2Properties = Utils.loadProps(mm2ConfigFile.getPath());
         final File outputFile = ns.get("output_path");
-        new ConsumerGroupOffsetSyncInspector().run(Utils.propsToStringMap(mm2Properties), outputFile);
+        final Duration adminTimeout = ns.get("admin_timeout");
+        final Duration requestTimeout = ns.get("request_timeout");
+        final boolean includeInactiveGroups = ns.getBoolean("include_inactive_groups");
+        new ConsumerGroupOffsetSyncInspector().run(Utils.propsToStringMap(mm2Properties), outputFile,
+                adminTimeout, requestTimeout, includeInactiveGroups);
     }
 
-    public void run(final Map<String, String> mm2ConfigProps, final File outputFile) throws IOException {
-        final Map<SourceAndTarget, ConsumerGroupOffsetsComparer.ConsumerGroupsCompareResult> clusterResults = inspect(mm2ConfigProps);
+    public void run(
+            final Map<String, String> mm2ConfigProps,
+            final File outputFile,
+            final Duration adminTimeout,
+            final Duration requestTimeout,
+            final boolean includeInactiveGroups
+    ) throws IOException {
+        final Map<SourceAndTarget, ConsumerGroupOffsetsComparer.ConsumerGroupsCompareResult> clusterResults =
+                inspect(mm2ConfigProps, adminTimeout, requestTimeout, includeInactiveGroups);
         LOGGER.info("Writing result CSV to {}", outputFile != null ? outputFile.getPath() : "STDOUT");
         if (outputFile == null) {
             writeToOutputStream(System.out, clusterResults);
@@ -95,7 +124,12 @@ public final class ConsumerGroupOffsetSyncInspector {
         LOGGER.info("Done.");
     }
 
-    public Map<SourceAndTarget, ConsumerGroupOffsetsComparer.ConsumerGroupsCompareResult> inspect(final Map<String, String> mm2ConfigProps) {
+    public Map<SourceAndTarget, ConsumerGroupOffsetsComparer.ConsumerGroupsCompareResult> inspect(
+            final Map<String, String> mm2ConfigProps,
+            final Duration adminTimeout,
+            final Duration requestTimeout,
+            final boolean includeInactiveGroups
+    ) {
         final MirrorMakerConfig mm2Config = new MirrorMakerConfig(mm2ConfigProps);
         final Map<SourceAndTarget, ConsumerGroupOffsetsComparer.ConsumerGroupsCompareResult> clusterResults = new HashMap<>();
 
@@ -114,39 +148,45 @@ public final class ConsumerGroupOffsetSyncInspector {
                 return;
             }
 
-            final Map<String, Map<TopicPartition, OffsetAndMetadata>> sourceConsumerOffsets;
-            final Map<String, Map<TopicPartition, OffsetAndMetadata>> targetConsumerOffsets;
-
             final String sourceClusterAlias = sourceAndTarget.source();
             final String targetClusterAlias = sourceAndTarget.target();
 
             final MirrorClientConfig sourceMirrorClientConfig = mm2Config.clientConfig(sourceClusterAlias);
+            final Map<String, Object> sourceAdminConfig = sourceMirrorClientConfig.adminConfig();
+            sourceAdminConfig.put("default.api.timeout.ms", Math.toIntExact(adminTimeout.toMillis()));
+            sourceAdminConfig.put("request.timeout.ms", Math.toIntExact(requestTimeout.toMillis()));
+            final AdminClient sourceAdminClient = KafkaAdminClient.create(sourceAdminConfig);
             final MirrorClientConfig targetMirrorClientConfig = mm2Config.clientConfig(targetClusterAlias);
+            final Map<String, Object> targetAdminConfig = targetMirrorClientConfig.adminConfig();
+            targetAdminConfig.put("default.api.timeout.ms", Math.toIntExact(adminTimeout.toMillis()));
+            targetAdminConfig.put("request.timeout.ms", Math.toIntExact(requestTimeout.toMillis()));
+            final AdminClient targetAdminClient = KafkaAdminClient.create(targetAdminConfig);
 
-            try (ConsumerGroupsStateCollector collector = ConsumerGroupsStateCollector.builder()
-                    .withOperationTimeout(Duration.ofMinutes(1))
-                    .withAdminClientConfiguration(sourceMirrorClientConfig.adminConfig())
+            final ConsumerGroupsStateCollector sourceCollector = ConsumerGroupsStateCollector.builder()
+                    .withAdminTimeout(adminTimeout)
+                    .withAdminClient(sourceAdminClient)
                     .withMirrorCheckpointConfig(mirrorCheckpointConfig)
-                    .build()) {
-                sourceConsumerOffsets = collector.collectConsumerGroupsState();
-            }
+                    .includeInactiveGroups(includeInactiveGroups)
+                    .build();
+            final Map<GroupAndState, Map<TopicPartition, OffsetAndMetadata>> sourceConsumerOffsets = sourceCollector.collectConsumerGroupsState();
 
-            try (ConsumerGroupsStateCollector collector = ConsumerGroupsStateCollector.builder()
-                    .withOperationTimeout(Duration.ofMinutes(1))
-                    .withAdminClientConfiguration(targetMirrorClientConfig.adminConfig())
+            final ConsumerGroupsStateCollector targetCollector = ConsumerGroupsStateCollector.builder()
+                    .withAdminTimeout(adminTimeout)
+                    .withAdminClient(targetAdminClient)
                     .withMirrorCheckpointConfig(mirrorCheckpointConfig)
-                    .build()) {
-                targetConsumerOffsets = collector.collectConsumerGroupsState();
-            }
+                    .build();
+            final Map<GroupAndState, Map<TopicPartition, OffsetAndMetadata>> targetConsumerOffsets = targetCollector.getCommittedOffsets(sourceConsumerOffsets.keySet());
 
             final ConsumerGroupOffsetsComparer comparer = ConsumerGroupOffsetsComparer.builder()
-                    .withOperationTimeout(Duration.ofMinutes(1))
-                    .withSourceConfiguration(sourceMirrorClientConfig.adminConfig())
+                    .withOperationTimeout(adminTimeout)
+                    .withSourceAdminClient(sourceAdminClient)
                     .withSourceConsumerOffsets(sourceConsumerOffsets)
                     .withTargetConsumerOffsets(targetConsumerOffsets)
                     .build();
             final ConsumerGroupOffsetsComparer.ConsumerGroupsCompareResult result = comparer.compare();
             clusterResults.put(sourceAndTarget, result);
+            sourceAdminClient.close();
+            targetAdminClient.close();
         });
         return clusterResults;
     }
@@ -170,7 +210,7 @@ public final class ConsumerGroupOffsetSyncInspector {
                         : groupResult.getTargetOffset().toString();
                 out.write(
                         String.format(CSV_ROW_FORMAT, sourceAndTarget.toString(),
-                                groupResult.getGroupId(), groupResult.getTopicPartition().topic(),
+                                groupResult.getGroupId(), groupResult.getGroupState(), groupResult.getTopicPartition().topic(),
                                 groupResult.getTopicPartition().partition(), sourceOffset, targetOffset,
                                 groupResult.isOk(), groupResult.getMessage()).getBytes(StandardCharsets.UTF_8));
                 out.write("\n".getBytes(StandardCharsets.UTF_8));

@@ -18,6 +18,7 @@ package org.apache.kafka.connect.mirror.integration;
 
 import org.apache.kafka.clients.admin.AdminClientConfig;
 import org.apache.kafka.clients.consumer.Consumer;
+import org.apache.kafka.common.ConsumerGroupState;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.connect.mirror.IdentityReplicationPolicy;
 import org.apache.kafka.connect.mirror.MirrorHeartbeatConnector;
@@ -25,11 +26,13 @@ import org.apache.kafka.connect.mirror.MirrorMakerConfig;
 import org.apache.kafka.connect.mirror.SourceAndTarget;
 import org.apache.kafka.connect.mirror.admin.ConsumerGroupOffsetSyncInspector;
 import org.apache.kafka.connect.mirror.admin.offsetinspector.ConsumerGroupOffsetsComparer;
+import org.apache.kafka.connect.mirror.admin.offsetinspector.GroupAndState;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 
+import java.time.Duration;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
@@ -102,7 +105,7 @@ public class OffsetSyncInspectorIntegrationTest extends MirrorConnectorsIntegrat
             Thread.sleep(TimeUnit.SECONDS.toMillis(2));
             final ConsumerGroupOffsetSyncInspector consumerGroupOffsetSyncInspector = new ConsumerGroupOffsetSyncInspector();
             final Map<SourceAndTarget, ConsumerGroupOffsetsComparer.ConsumerGroupsCompareResult> clusterResults =
-                    consumerGroupOffsetSyncInspector.inspect(mm2Props);
+                    consumerGroupOffsetSyncInspector.inspect(mm2Props, Duration.ofMinutes(1), Duration.ofSeconds(30), true);
             final ConsumerGroupOffsetsComparer.ConsumerGroupsCompareResult primaryToBackupResult =
                     clusterResults.get(new SourceAndTarget(PRIMARY_CLUSTER_ALIAS, BACKUP_CLUSTER_ALIAS));
 
@@ -113,10 +116,13 @@ public class OffsetSyncInspectorIntegrationTest extends MirrorConnectorsIntegrat
             for (int partition = 0; partition < NUM_PARTITIONS; partition++) {
                 final ConsumerGroupOffsetsComparer.ConsumerGroupCompareResult result =
                         new ConsumerGroupOffsetsComparer.ConsumerGroupCompareResult(
-                            consumerGroupTopic1, new TopicPartition(testTopic1Name, partition),
-                            ((Integer) NUM_RECORDS_PER_PARTITION).longValue(), ((Integer) NUM_RECORDS_PER_PARTITION).longValue(),
+                            new GroupAndState(consumerGroupTopic1, ConsumerGroupState.STABLE),
+                                new TopicPartition(testTopic1Name, partition),
+                                ((Integer) NUM_RECORDS_PER_PARTITION).longValue(),
+                                ((Integer) NUM_RECORDS_PER_PARTITION).longValue(),
                             true, "Target has offset sync.");
-                assertTrue(consumerGroupCompareResult.contains(result), "kala");
+                assertTrue(consumerGroupCompareResult.contains(result),
+                        String.format("Result %s not contained in %s", result, consumerGroupCompareResult));
             }
 
             final ConsumerGroupOffsetsComparer.ConsumerGroupsCompareResult backupToPrimaryResult =
@@ -169,7 +175,7 @@ public class OffsetSyncInspectorIntegrationTest extends MirrorConnectorsIntegrat
             Thread.sleep(TimeUnit.SECONDS.toMillis(2));
             final ConsumerGroupOffsetSyncInspector consumerGroupOffsetSyncInspector = new ConsumerGroupOffsetSyncInspector();
             final Map<SourceAndTarget, ConsumerGroupOffsetsComparer.ConsumerGroupsCompareResult> clusterResults =
-                    consumerGroupOffsetSyncInspector.inspect(mm2Props);
+                    consumerGroupOffsetSyncInspector.inspect(mm2Props, Duration.ofMinutes(1), Duration.ofSeconds(30), false);
             final ConsumerGroupOffsetsComparer.ConsumerGroupsCompareResult primaryToBackupResult =
                     clusterResults.get(new SourceAndTarget(PRIMARY_CLUSTER_ALIAS, BACKUP_CLUSTER_ALIAS));
 
@@ -182,7 +188,8 @@ public class OffsetSyncInspectorIntegrationTest extends MirrorConnectorsIntegrat
                 final String message = partition == 0 ? "Target has offset sync." : "Target consumer group missing the topic partition. Source partition is empty, offset not expected to be synced.";
                 final ConsumerGroupOffsetsComparer.ConsumerGroupCompareResult result =
                         new ConsumerGroupOffsetsComparer.ConsumerGroupCompareResult(
-                                consumerGroupTopicPartition0Filled, new TopicPartition(testTopic2Name, partition),
+                                new GroupAndState(consumerGroupTopicPartition0Filled, ConsumerGroupState.STABLE),
+                                new TopicPartition(testTopic2Name, partition),
                                 expectedSourceOffset, expectedTargetOffset,
                                 true, message);
                 assertTrue(consumerGroupCompareResult.contains(result),
@@ -241,7 +248,7 @@ public class OffsetSyncInspectorIntegrationTest extends MirrorConnectorsIntegrat
             Thread.sleep(TimeUnit.SECONDS.toMillis(2));
             final ConsumerGroupOffsetSyncInspector consumerGroupOffsetSyncInspector = new ConsumerGroupOffsetSyncInspector();
             final Map<SourceAndTarget, ConsumerGroupOffsetsComparer.ConsumerGroupsCompareResult> clusterResults =
-                    consumerGroupOffsetSyncInspector.inspect(mm2Props);
+                    consumerGroupOffsetSyncInspector.inspect(mm2Props, Duration.ofMinutes(1), Duration.ofSeconds(30), false);
             final ConsumerGroupOffsetsComparer.ConsumerGroupsCompareResult result =
                     clusterResults.get(new SourceAndTarget(PRIMARY_CLUSTER_ALIAS, BACKUP_CLUSTER_ALIAS));
             assertEquals(0, result.getConsumerGroupsCompareResult().stream().filter(element -> element.getGroupId().equals(consumerGroupNotMirroredTopic)).count());

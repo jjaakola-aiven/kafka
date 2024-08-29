@@ -18,50 +18,51 @@
 package org.apache.kafka.connect.mirror.admin.offsetinspector;
 
 import org.apache.kafka.clients.admin.AdminClient;
-import org.apache.kafka.clients.admin.KafkaAdminClient;
 import org.apache.kafka.clients.admin.ListOffsetsResult;
 import org.apache.kafka.clients.admin.OffsetSpec;
 import org.apache.kafka.common.TopicPartition;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import java.time.Duration;
-import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
-import java.util.Objects;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
 public final class TopicPartitionCache {
 
+    private static final Logger LOGGER = LoggerFactory.getLogger(TopicPartitionCache.class);
+
     private final Map<TopicPartition, Boolean> topicPartitionMapCache = new HashMap<>();
-    private final Map<String, Object> configuration;
-    private AdminClient adminClient;
+    private final AdminClient adminClient;
 
-    public TopicPartitionCache(final Map<String, Object> configuration) {
-        this.configuration = Collections.unmodifiableMap(Objects.requireNonNull(configuration));
-    }
-
-    private AdminClient getAdminClient() {
-        if (adminClient == null) {
-            adminClient = KafkaAdminClient.create(configuration);
-        }
-        return adminClient;
+    public TopicPartitionCache(final AdminClient adminClient) {
+        this.adminClient = adminClient;
     }
 
     public boolean isEmpty(final TopicPartition topicPartition, final Duration operationTimeout) {
         return topicPartitionMapCache.computeIfAbsent(topicPartition, tp -> {
-            final ListOffsetsResult.ListOffsetsResultInfo listOffsetsResultInfo;
+            final ListOffsetsResult.ListOffsetsResultInfo listOffsetsResultInfoLatest;
+            final ListOffsetsResult.ListOffsetsResultInfo listOffsetsResultInfoEarliest;
             try {
-                final HashMap<TopicPartition, OffsetSpec> topicPartitionOffsets = new HashMap<>();
-                topicPartitionOffsets.put(tp, OffsetSpec.latest());
-                listOffsetsResultInfo = getAdminClient().listOffsets(topicPartitionOffsets)
+                final HashMap<TopicPartition, OffsetSpec> earliestPartitionOffsets = new HashMap<>();
+                earliestPartitionOffsets.put(tp, OffsetSpec.earliest());
+                final HashMap<TopicPartition, OffsetSpec> latestPartitionOffsets = new HashMap<>();
+                latestPartitionOffsets.put(tp, OffsetSpec.latest());
+                listOffsetsResultInfoEarliest = adminClient.listOffsets(earliestPartitionOffsets)
+                        .partitionResult(topicPartition)
+                        .get(operationTimeout.toMillis(), TimeUnit.MILLISECONDS);
+                listOffsetsResultInfoLatest = adminClient.listOffsets(latestPartitionOffsets)
                         .partitionResult(topicPartition)
                         .get(operationTimeout.toMillis(), TimeUnit.MILLISECONDS);
             } catch (InterruptedException | ExecutionException | TimeoutException e) {
                 throw new RuntimeException(e);
             }
-            return listOffsetsResultInfo.offset() < 1;
+            LOGGER.info("Earliest offset {} / {} latest offsets", listOffsetsResultInfoEarliest.offset(), listOffsetsResultInfoLatest.offset());
+            return listOffsetsResultInfoEarliest.offset() == listOffsetsResultInfoLatest.offset();
         });
     }
 }
