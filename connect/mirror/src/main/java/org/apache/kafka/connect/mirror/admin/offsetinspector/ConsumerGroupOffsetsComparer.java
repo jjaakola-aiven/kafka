@@ -23,13 +23,13 @@ import org.apache.kafka.common.ConsumerGroupState;
 import org.apache.kafka.common.TopicPartition;
 
 import java.time.Duration;
-import java.util.ArrayList;
-import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 
 public final class ConsumerGroupOffsetsComparer {
 
@@ -120,7 +120,7 @@ public final class ConsumerGroupOffsetsComparer {
     public static final class ConsumerGroupsCompareResult {
 
         private Map<GroupAndState, Map<TopicPartition, OffsetAndMetadata>> extraAtTarget = Collections.emptyMap();
-        private final Collection<ConsumerGroupCompareResult> result = new ArrayList<>();
+        private final Set<ConsumerGroupCompareResult> result = new HashSet<>();
 
         private ConsumerGroupsCompareResult() {
             /* hide constructor */
@@ -134,7 +134,7 @@ public final class ConsumerGroupOffsetsComparer {
             this.extraAtTarget = extraAtTarget;
         }
 
-        public Collection<ConsumerGroupCompareResult> getConsumerGroupsCompareResult() {
+        public Set<ConsumerGroupCompareResult> getConsumerGroupsCompareResult() {
             return result;
         }
 
