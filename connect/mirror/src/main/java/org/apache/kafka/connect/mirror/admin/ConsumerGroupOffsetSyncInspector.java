@@ -84,6 +84,11 @@ public final class ConsumerGroupOffsetSyncInspector {
                 .help("Inspect also inactive (empty/dead) consumer groups.")
                 .action(Arguments.storeTrue());
 
+        parser.addArgument("--include-ok-groups")
+                .required(false)
+                .help("Emit consumer group inspection result for groups that are ok.")
+                .action(Arguments.storeTrue());
+
         final Namespace ns;
         try {
             ns = parser.parseArgs(args);
@@ -99,8 +104,9 @@ public final class ConsumerGroupOffsetSyncInspector {
         final Duration adminTimeout = ns.get("admin_timeout");
         final Duration requestTimeout = ns.get("request_timeout");
         final boolean includeInactiveGroups = ns.getBoolean("include_inactive_groups");
+        final boolean includeOkConsumerGroups = ns.getBoolean("include_ok_groups");
         new ConsumerGroupOffsetSyncInspector().run(Utils.propsToStringMap(mm2Properties), outputFile,
-                adminTimeout, requestTimeout, includeInactiveGroups);
+                adminTimeout, requestTimeout, includeInactiveGroups, includeOkConsumerGroups);
     }
 
     public void run(
@@ -108,10 +114,11 @@ public final class ConsumerGroupOffsetSyncInspector {
             final File outputFile,
             final Duration adminTimeout,
             final Duration requestTimeout,
-            final boolean includeInactiveGroups
+            final boolean includeInactiveGroups,
+            final boolean includeOkConsumerGroups
     ) throws IOException {
         final Map<SourceAndTarget, ConsumerGroupOffsetsComparer.ConsumerGroupsCompareResult> clusterResults =
-                inspect(mm2ConfigProps, adminTimeout, requestTimeout, includeInactiveGroups);
+                inspect(mm2ConfigProps, adminTimeout, requestTimeout, includeInactiveGroups, includeOkConsumerGroups);
         LOGGER.info("Writing result CSV to {}", outputFile != null ? outputFile.getPath() : "STDOUT");
         if (outputFile == null) {
             writeToOutputStream(System.out, clusterResults);
@@ -128,7 +135,8 @@ public final class ConsumerGroupOffsetSyncInspector {
             final Map<String, String> mm2ConfigProps,
             final Duration adminTimeout,
             final Duration requestTimeout,
-            final boolean includeInactiveGroups
+            final boolean includeInactiveGroups,
+            final boolean includeOkConsumerGroups
     ) {
         final MirrorMakerConfig mm2Config = new MirrorMakerConfig(mm2ConfigProps);
         final Map<SourceAndTarget, ConsumerGroupOffsetsComparer.ConsumerGroupsCompareResult> clusterResults = new HashMap<>();
@@ -182,6 +190,7 @@ public final class ConsumerGroupOffsetSyncInspector {
                     .withSourceAdminClient(sourceAdminClient)
                     .withSourceConsumerOffsets(sourceConsumerOffsets)
                     .withTargetConsumerOffsets(targetConsumerOffsets)
+                    .withIncludeOkConsumerGroups(includeOkConsumerGroups)
                     .build();
             final ConsumerGroupOffsetsComparer.ConsumerGroupsCompareResult result = comparer.compare();
             clusterResults.put(sourceAndTarget, result);
