@@ -94,16 +94,10 @@ public final class ConsumerGroupsStateCollector {
                 if (includeInactiveGroups) {
                     selectedGroupIds.add(groupAndState);
                 } else {
-                    switch (groupState) {
-                        case STABLE:
-                        case ASSIGNING:
-                        case RECONCILING:
-                        case PREPARING_REBALANCE:
-                        case COMPLETING_REBALANCE:
-                            selectedGroupIds.add(groupAndState);
-                            return;
-                        default:
-                            LOGGER.debug("Group {} is in state {} and not inspected.", key, groupState);
+                    if (groupAndState.active()) {
+                        selectedGroupIds.add(groupAndState);
+                    } else {
+                        LOGGER.debug("Group {} is in state {} and not inspected.", key, groupState);
                     }
                 }
             } catch (InterruptedException | ExecutionException | TimeoutException e) {

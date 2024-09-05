@@ -36,7 +36,8 @@ public final class TopicPartitionCache {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(TopicPartitionCache.class);
 
-    private final Map<TopicPartition, Boolean> topicPartitionMapCache = new HashMap<>();
+    private final Map<TopicPartition, Boolean> topicPartitionisEmptyCache = new HashMap<>();
+    private final Map<TopicPartition, Long> topicPartitionLatestOffsetsCache = new HashMap<>();
     private final AdminClient adminClient;
 
     public TopicPartitionCache(final AdminClient adminClient) {
@@ -44,7 +45,7 @@ public final class TopicPartitionCache {
     }
 
     public boolean isEmpty(final TopicPartition topicPartition, final Duration operationTimeout) {
-        return topicPartitionMapCache.computeIfAbsent(topicPartition, tp -> {
+        return topicPartitionisEmptyCache.computeIfAbsent(topicPartition, tp -> {
             final ListOffsetsResult.ListOffsetsResultInfo listOffsetsResultInfoLatest;
             final ListOffsetsResult.ListOffsetsResultInfo listOffsetsResultInfoEarliest;
             try {
@@ -61,8 +62,35 @@ public final class TopicPartitionCache {
             } catch (InterruptedException | ExecutionException | TimeoutException e) {
                 throw new RuntimeException(e);
             }
-            LOGGER.info("Earliest offset {} / {} latest offsets", listOffsetsResultInfoEarliest.offset(), listOffsetsResultInfoLatest.offset());
+            // Update the latest offsets cache too.
+            topicPartitionLatestOffsetsCache.putIfAbsent(topicPartition, listOffsetsResultInfoLatest.offset());
+            LOGGER.info("Earliest offset {} / {} latest offset", listOffsetsResultInfoEarliest.offset(), listOffsetsResultInfoLatest.offset());
             return listOffsetsResultInfoEarliest.offset() == listOffsetsResultInfoLatest.offset();
         });
     }
+
+
+    /**
+     * Return the latest offset for consuming.
+     * @param topicPartition
+     * @param operationTimeout
+     * @return
+     */
+    public long latestOffset(final TopicPartition topicPartition, final Duration operationTimeout) {
+        return topicPartitionLatestOffsetsCache.computeIfAbsent(topicPartition, tp -> {
+            final ListOffsetsResult.ListOffsetsResultInfo listOffsetsResultInfo;
+            try {
+                final HashMap<TopicPartition, OffsetSpec> partitionOffsets = new HashMap<>();
+                partitionOffsets.put(tp, OffsetSpec.latest());
+                listOffsetsResultInfo = adminClient.listOffsets(partitionOffsets)
+                        .partitionResult(topicPartition)
+                        .get(operationTimeout.toMillis(), TimeUnit.MILLISECONDS);
+            } catch (InterruptedException | ExecutionException | TimeoutException e) {
+                throw new RuntimeException(e);
+            }
+            LOGGER.debug("Latest offset {}, latest record offset {}", listOffsetsResultInfo.offset(), listOffsetsResultInfo.offset() - 1);
+            return listOffsetsResultInfo.offset() - 1;
+        });
+    }
+
 }

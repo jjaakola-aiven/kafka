@@ -54,9 +54,9 @@ import java.util.Properties;
 public final class ConsumerGroupOffsetSyncInspector {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(ConsumerGroupOffsetSyncInspector.class);
-    private static final String CSV_ROW_FORMAT = "%s,%s,%s,%s,%s,%s,%s,%s,%s";
+    private static final String CSV_ROW_FORMAT = "%s,%s,%s,%s,%s,%s,%s,%s,%s,%s";
     private static final String CSV_HEADER_FORMAT = String.format(CSV_ROW_FORMAT, "CLUSTER PAIR", "GROUP", "GROUP STATE", "TOPIC", "PARTITION",
-            "SOURCE OFFSET", "TARGET OFFSET", "IS OK", "MESSAGE");
+            "SOURCE OFFSET", "TARGET OFFSET", "TARGET LAG", "IS OK", "MESSAGE");
 
     public static void main(final String[] args) throws IOException {
         final ArgumentParser parser = ArgumentParsers.newArgumentParser("mirror-maker-consumer-group-offset-sync-inspector");
@@ -188,6 +188,7 @@ public final class ConsumerGroupOffsetSyncInspector {
             final ConsumerGroupOffsetsComparer comparer = ConsumerGroupOffsetsComparer.builder()
                     .withOperationTimeout(adminTimeout)
                     .withSourceAdminClient(sourceAdminClient)
+                    .withTargetAdminClient(targetAdminClient)
                     .withSourceConsumerOffsets(sourceConsumerOffsets)
                     .withTargetConsumerOffsets(targetConsumerOffsets)
                     .withIncludeOkConsumerGroups(includeOkConsumerGroups)
@@ -209,7 +210,7 @@ public final class ConsumerGroupOffsetSyncInspector {
             throw new RuntimeException(e);
         }
 
-        clusterResults.forEach((sourceAndTarget, result) -> result.getConsumerGroupsCompareResult().forEach(groupResult -> {
+        clusterResults.forEach((sourceAndTarget, result) -> result.getConsumerGroupsCompareResult().stream().sorted().forEach(groupResult -> {
             try {
                 final String sourceOffset = groupResult.getSourceOffset() == null
                         ? "-"
@@ -217,10 +218,13 @@ public final class ConsumerGroupOffsetSyncInspector {
                 final String targetOffset = groupResult.getTargetOffset() == null
                         ? "-"
                         : groupResult.getTargetOffset().toString();
+                final String targetLag = groupResult.getTargetLag() == null
+                        ? "-"
+                        : groupResult.getTargetLag().toString();
                 out.write(
                         String.format(CSV_ROW_FORMAT, sourceAndTarget.toString(),
-                                groupResult.getGroupId(), groupResult.getGroupState(), groupResult.getTopicPartition().topic(),
-                                groupResult.getTopicPartition().partition(), sourceOffset, targetOffset,
+                                groupResult.getGroupId(), groupResult.getGroupState(), groupResult.getTopic(),
+                                groupResult.getPartition(), sourceOffset, targetOffset, targetLag,
                                 groupResult.isOk(), groupResult.getMessage()).getBytes(StandardCharsets.UTF_8));
                 out.write("\n".getBytes(StandardCharsets.UTF_8));
             } catch (IOException e) {

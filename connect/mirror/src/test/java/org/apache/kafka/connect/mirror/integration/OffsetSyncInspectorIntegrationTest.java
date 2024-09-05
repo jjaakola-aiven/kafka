@@ -37,7 +37,6 @@ import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
 import java.util.Collections;
-import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
@@ -47,7 +46,6 @@ import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Tests MM2 offset sync inspector tool.
@@ -126,7 +124,7 @@ public class OffsetSyncInspectorIntegrationTest extends MirrorConnectorsIntegrat
                                 new TopicPartition(testTopic1Name, partition),
                                 ((Integer) NUM_RECORDS_PER_PARTITION).longValue(),
                                 ((Integer) NUM_RECORDS_PER_PARTITION).longValue(),
-                            true, "Target has offset sync.");
+                            9L, true, "Target has offset sync.");
                 expectedConsumerGroupCompareResult.add(result);
             }
             assertEquals(expectedConsumerGroupCompareResult, primaryToBackupResult.getConsumerGroupsCompareResult());
@@ -204,7 +202,7 @@ public class OffsetSyncInspectorIntegrationTest extends MirrorConnectorsIntegrat
                         new ConsumerGroupOffsetsComparer.ConsumerGroupCompareResult(
                                 new GroupAndState("consumer-group-dummy", ConsumerGroupState.EMPTY),
                                 new TopicPartition(testTopic1Name, partition),
-                                0L, 0L, true, "Target has offset sync.");
+                                0L, 0L, 9L, true, "Target has offset sync.");
                 expectedConsumerGroupCompareResult.add(result);
             }
             for (int partition = 0; partition < NUM_PARTITIONS; partition++) {
@@ -213,19 +211,19 @@ public class OffsetSyncInspectorIntegrationTest extends MirrorConnectorsIntegrat
                     result = new ConsumerGroupOffsetsComparer.ConsumerGroupCompareResult(
                             new GroupAndState(consumerGroupTopic1, ConsumerGroupState.EMPTY),
                             new TopicPartition(testTopic1Name, partition),
-                            9L, 9L, true, "Target has offset sync.");
+                            9L, 9L, 0L, true, "Target has offset sync.");
                 } else {
                     result = new ConsumerGroupOffsetsComparer.ConsumerGroupCompareResult(
                             new GroupAndState(consumerGroupTopic1, ConsumerGroupState.EMPTY),
                             new TopicPartition(testTopic1Name, partition),
-                            0L, 0L, true, "Target has offset sync.");
+                            0L, 0L, 9L, true, "Target has offset sync.");
 
                 }
                 expectedConsumerGroupCompareResult.add(result);
             }
             assertEquals(
-                    expectedConsumerGroupCompareResult.stream().sorted(Comparator.comparing(ConsumerGroupOffsetsComparer.ConsumerGroupCompareResult::toString)).collect(Collectors.toList()),
-                    primaryToBackupResult.getConsumerGroupsCompareResult().stream().sorted(Comparator.comparing(ConsumerGroupOffsetsComparer.ConsumerGroupCompareResult::toString)).collect(Collectors.toList()));
+                    expectedConsumerGroupCompareResult.stream().sorted().collect(Collectors.toList()),
+                    primaryToBackupResult.getConsumerGroupsCompareResult().stream().sorted().collect(Collectors.toList()));
 
             final ConsumerGroupOffsetsComparer.ConsumerGroupsCompareResult backupToPrimaryResult =
                     clusterResults.get(new SourceAndTarget(BACKUP_CLUSTER_ALIAS, PRIMARY_CLUSTER_ALIAS));
@@ -287,22 +285,28 @@ public class OffsetSyncInspectorIntegrationTest extends MirrorConnectorsIntegrat
             final ConsumerGroupOffsetsComparer.ConsumerGroupsCompareResult primaryToBackupResult =
                     clusterResults.get(new SourceAndTarget(PRIMARY_CLUSTER_ALIAS, BACKUP_CLUSTER_ALIAS));
 
+            final Set<ConsumerGroupOffsetsComparer.ConsumerGroupCompareResult> expectedConsumerGroupCompareResult =
+                    new HashSet<>();
             final Set<ConsumerGroupOffsetsComparer.ConsumerGroupCompareResult> consumerGroupCompareResult
                     = primaryToBackupResult.getConsumerGroupsCompareResult();
             assertEquals(2, consumerGroupCompareResult.size());
             for (int partition = 0; partition < 2; partition++) {
                 final Long expectedSourceOffset = partition == 0 ? ((Integer) NUM_RECORDS_PER_PARTITION).longValue() : 0L;
                 final Long expectedTargetOffset = partition == 0 ? ((Integer) NUM_RECORDS_PER_PARTITION).longValue() : null;
-                final String message = partition == 0 ? "Target has offset sync." : "Target consumer group missing the topic partition. Source partition is empty, offset not expected to be synced.";
+                final Long expectedTargetLag = partition == 0 ? 0L : null;
+                final String message = partition == 0 ? "Target has offset sync." : "Target consumer group missing the topic partition. Source partition is empty therefore offset not expected to be synced.";
                 final ConsumerGroupOffsetsComparer.ConsumerGroupCompareResult result =
                         new ConsumerGroupOffsetsComparer.ConsumerGroupCompareResult(
                                 new GroupAndState(consumerGroupTopicPartition0Filled, ConsumerGroupState.STABLE),
                                 new TopicPartition(testTopic2Name, partition),
-                                expectedSourceOffset, expectedTargetOffset,
+                                expectedSourceOffset, expectedTargetOffset, expectedTargetLag,
                                 true, message);
-                assertTrue(consumerGroupCompareResult.contains(result),
-                        String.format("Result '%s' does not contain '%s'", consumerGroupCompareResult, result));
+                expectedConsumerGroupCompareResult.add(result);
             }
+
+            assertEquals(
+                    expectedConsumerGroupCompareResult.stream().sorted().collect(Collectors.toList()),
+                    primaryToBackupResult.getConsumerGroupsCompareResult().stream().sorted().collect(Collectors.toList()));
 
             final ConsumerGroupOffsetsComparer.ConsumerGroupsCompareResult backupToPrimaryResult =
                     clusterResults.get(new SourceAndTarget(BACKUP_CLUSTER_ALIAS, PRIMARY_CLUSTER_ALIAS));

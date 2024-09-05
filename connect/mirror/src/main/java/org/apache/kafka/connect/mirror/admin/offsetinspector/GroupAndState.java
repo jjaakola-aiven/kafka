@@ -39,6 +39,19 @@ public final class GroupAndState {
         return state;
     }
 
+    public boolean active() {
+        switch (state) {
+            case STABLE:
+            case ASSIGNING:
+            case RECONCILING:
+            case PREPARING_REBALANCE:
+            case COMPLETING_REBALANCE:
+                return true;
+            default:
+                return false;
+        }
+    }
+
     @Override
     public boolean equals(Object o) {
         if (this == o) return true;
