@@ -88,8 +88,8 @@ public final class TopicPartitionCache {
             } catch (InterruptedException | ExecutionException | TimeoutException e) {
                 throw new RuntimeException(e);
             }
-            LOGGER.debug("Latest offset {}, latest record offset {}", listOffsetsResultInfo.offset(), listOffsetsResultInfo.offset() - 1);
-            return listOffsetsResultInfo.offset() - 1;
+            LOGGER.debug("Latest offset {}, latest record offset {}", listOffsetsResultInfo.offset(), listOffsetsResultInfo.offset());
+            return listOffsetsResultInfo.offset();
         });
     }
 

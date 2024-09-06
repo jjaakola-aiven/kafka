@@ -123,6 +123,7 @@ public class OffsetSyncInspectorIntegrationTest extends MirrorConnectorsIntegrat
                             new GroupAndState(consumerGroupTopic1, ConsumerGroupState.STABLE),
                                 new TopicPartition(testTopic1Name, partition),
                                 ((Integer) NUM_RECORDS_PER_PARTITION).longValue(),
+                                121212L,
                                 ((Integer) NUM_RECORDS_PER_PARTITION).longValue(),
                             9L, true, "Target has offset sync.");
                 expectedConsumerGroupCompareResult.add(result);
@@ -202,7 +203,8 @@ public class OffsetSyncInspectorIntegrationTest extends MirrorConnectorsIntegrat
                         new ConsumerGroupOffsetsComparer.ConsumerGroupCompareResult(
                                 new GroupAndState("consumer-group-dummy", ConsumerGroupState.EMPTY),
                                 new TopicPartition(testTopic1Name, partition),
-                                0L, 0L, 9L, true, "Target has offset sync.");
+                                0L, 10L,
+                                0L, 10L, true, "Target has offset sync.");
                 expectedConsumerGroupCompareResult.add(result);
             }
             for (int partition = 0; partition < NUM_PARTITIONS; partition++) {
@@ -211,12 +213,14 @@ public class OffsetSyncInspectorIntegrationTest extends MirrorConnectorsIntegrat
                     result = new ConsumerGroupOffsetsComparer.ConsumerGroupCompareResult(
                             new GroupAndState(consumerGroupTopic1, ConsumerGroupState.EMPTY),
                             new TopicPartition(testTopic1Name, partition),
-                            9L, 9L, 0L, true, "Target has offset sync.");
+                            9L, 1L,
+                            9L, 1L, true, "Target has offset sync.");
                 } else {
                     result = new ConsumerGroupOffsetsComparer.ConsumerGroupCompareResult(
                             new GroupAndState(consumerGroupTopic1, ConsumerGroupState.EMPTY),
                             new TopicPartition(testTopic1Name, partition),
-                            0L, 0L, 9L, true, "Target has offset sync.");
+                            0L, 10L,
+                            0L, 10L, true, "Target has offset sync.");
 
                 }
                 expectedConsumerGroupCompareResult.add(result);
@@ -293,13 +297,15 @@ public class OffsetSyncInspectorIntegrationTest extends MirrorConnectorsIntegrat
             for (int partition = 0; partition < 2; partition++) {
                 final Long expectedSourceOffset = partition == 0 ? ((Integer) NUM_RECORDS_PER_PARTITION).longValue() : 0L;
                 final Long expectedTargetOffset = partition == 0 ? ((Integer) NUM_RECORDS_PER_PARTITION).longValue() : null;
-                final Long expectedTargetLag = partition == 0 ? 0L : null;
+                final Long expectedTargetLag, expectedLagAtTargetToSource;
+                expectedTargetLag = expectedLagAtTargetToSource = partition == 0 ? 0L : null;
                 final String message = partition == 0 ? "Target has offset sync." : "Target consumer group missing the topic partition. Source partition is empty therefore offset not expected to be synced.";
                 final ConsumerGroupOffsetsComparer.ConsumerGroupCompareResult result =
                         new ConsumerGroupOffsetsComparer.ConsumerGroupCompareResult(
                                 new GroupAndState(consumerGroupTopicPartition0Filled, ConsumerGroupState.STABLE),
                                 new TopicPartition(testTopic2Name, partition),
-                                expectedSourceOffset, expectedTargetOffset, expectedTargetLag,
+                                expectedSourceOffset, expectedLagAtTargetToSource,
+                                expectedTargetOffset, expectedTargetLag,
                                 true, message);
                 expectedConsumerGroupCompareResult.add(result);
             }

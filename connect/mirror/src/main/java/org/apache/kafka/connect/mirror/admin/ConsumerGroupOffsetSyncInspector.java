@@ -27,6 +27,7 @@ import org.apache.kafka.connect.mirror.MirrorCheckpointConfig;
 import org.apache.kafka.connect.mirror.MirrorCheckpointConnector;
 import org.apache.kafka.connect.mirror.MirrorClientConfig;
 import org.apache.kafka.connect.mirror.MirrorMakerConfig;
+import org.apache.kafka.connect.mirror.OffsetSyncStore;
 import org.apache.kafka.connect.mirror.SourceAndTarget;
 import org.apache.kafka.connect.mirror.admin.offsetinspector.ConsumerGroupOffsetsComparer;
 import org.apache.kafka.connect.mirror.admin.offsetinspector.ConsumerGroupsStateCollector;
@@ -50,13 +51,19 @@ import java.time.Duration;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Properties;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+
 
 public final class ConsumerGroupOffsetSyncInspector {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(ConsumerGroupOffsetSyncInspector.class);
-    private static final String CSV_ROW_FORMAT = "%s,%s,%s,%s,%s,%s,%s,%s,%s,%s";
+    private static final String CSV_ROW_FORMAT = "%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s";
     private static final String CSV_HEADER_FORMAT = String.format(CSV_ROW_FORMAT, "CLUSTER PAIR", "GROUP", "GROUP STATE", "TOPIC", "PARTITION",
-            "SOURCE OFFSET", "TARGET OFFSET", "TARGET LAG", "IS OK", "MESSAGE");
+            "SOURCE OFFSET", "TARGET LAG TO SOURCE", "TARGET OFFSET", "TARGET LAG", "IS OK", "MESSAGE");
 
     public static void main(final String[] args) throws IOException {
         final ArgumentParser parser = ArgumentParsers.newArgumentParser("mirror-maker-consumer-group-offset-sync-inspector");
@@ -156,6 +163,14 @@ public final class ConsumerGroupOffsetSyncInspector {
                 return;
             }
 
+            // Start the offset sync store loading, use barrier to stop the result comparison to run before
+            // offset sync store is ready.
+            final OffsetSyncStore offsetSyncStore = new OffsetSyncStore(mirrorCheckpointConfig);
+            final ExecutorService executor = Executors.newSingleThreadExecutor();
+            final Future<?> offsetSyncStoreLoadFuture = executor.submit(() -> {
+                offsetSyncStore.start(true);
+            });
+
             final String sourceClusterAlias = sourceAndTarget.source();
             final String targetClusterAlias = sourceAndTarget.target();
 
@@ -185,6 +200,14 @@ public final class ConsumerGroupOffsetSyncInspector {
                     .build();
             final Map<GroupAndState, Map<TopicPartition, OffsetAndMetadata>> targetConsumerOffsets = targetCollector.getCommittedOffsets(sourceConsumerOffsets.keySet());
 
+            // No more new tasks allowed.
+            executor.shutdown();
+            try {
+                offsetSyncStoreLoadFuture.get();
+            } catch (InterruptedException | ExecutionException e) {
+                throw new RuntimeException(e);
+            }
+
             final ConsumerGroupOffsetsComparer comparer = ConsumerGroupOffsetsComparer.builder()
                     .withOperationTimeout(adminTimeout)
                     .withSourceAdminClient(sourceAdminClient)
@@ -192,11 +215,20 @@ public final class ConsumerGroupOffsetSyncInspector {
                     .withSourceConsumerOffsets(sourceConsumerOffsets)
                     .withTargetConsumerOffsets(targetConsumerOffsets)
                     .withIncludeOkConsumerGroups(includeOkConsumerGroups)
+                    .withOffsetSyncStore(offsetSyncStore)
                     .build();
             final ConsumerGroupOffsetsComparer.ConsumerGroupsCompareResult result = comparer.compare();
             clusterResults.put(sourceAndTarget, result);
             sourceAdminClient.close();
             targetAdminClient.close();
+            offsetSyncStore.close();
+            try {
+                if (!executor.awaitTermination(1000, TimeUnit.MILLISECONDS)) {
+                    executor.shutdownNow();
+                }
+            } catch (InterruptedException e) {
+                executor.shutdownNow();
+            }
         });
         return clusterResults;
     }
@@ -224,7 +256,8 @@ public final class ConsumerGroupOffsetSyncInspector {
                 out.write(
                         String.format(CSV_ROW_FORMAT, sourceAndTarget.toString(),
                                 groupResult.getGroupId(), groupResult.getGroupState(), groupResult.getTopic(),
-                                groupResult.getPartition(), sourceOffset, targetOffset, targetLag,
+                                groupResult.getPartition(), sourceOffset, groupResult.getLagAtTargetToSource(),
+                                targetOffset, targetLag,
                                 groupResult.isOk(), groupResult.getMessage()).getBytes(StandardCharsets.UTF_8));
                 out.write("\n".getBytes(StandardCharsets.UTF_8));
             } catch (IOException e) {

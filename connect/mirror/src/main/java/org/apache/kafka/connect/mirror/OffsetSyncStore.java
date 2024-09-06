@@ -306,7 +306,7 @@ public class OffsetSyncStore implements AutoCloseable {
         return iSync == jSync || (bound >= 0 && iSync.upstreamOffset() >= bound);
     }
 
-    private Optional<OffsetSync> latestOffsetSync(TopicPartition topicPartition, long upstreamOffset) {
+    public Optional<OffsetSync> latestOffsetSync(TopicPartition topicPartition, long upstreamOffset) {
         return Optional.ofNullable(offsetSyncs.get(topicPartition))
                 .map(syncs -> lookupLatestSync(syncs, upstreamOffset));
     }
