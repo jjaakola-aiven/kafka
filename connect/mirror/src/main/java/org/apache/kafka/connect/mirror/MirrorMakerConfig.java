@@ -138,6 +138,11 @@ public class MirrorMakerConfig extends AbstractConfig {
         return pairs;
     }
 
+    public boolean clusterPairEnabled(SourceAndTarget sourceAndTarget) {
+        final Map<String, String> originalStrings = originalsStrings();
+        return Boolean.parseBoolean(originalStrings.get(sourceAndTarget.toString() + ".enabled"));
+    }
+
     /** Construct a MirrorClientConfig from properties of the form cluster.x.y.z.
       * Use to connect to a cluster based on the MirrorMaker top-level config file.
       */

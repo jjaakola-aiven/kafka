@@ -89,7 +89,7 @@ public class MirrorCheckpointConfig extends MirrorConnectorConfig {
         super(configDef, props);
     }
 
-    Duration emitCheckpointsInterval() {
+    public Duration emitCheckpointsInterval() {
         if (getBoolean(EMIT_CHECKPOINTS_ENABLED)) {
             return Duration.ofSeconds(getLong(EMIT_CHECKPOINTS_INTERVAL_SECONDS));
         } else {
@@ -111,11 +111,11 @@ public class MirrorCheckpointConfig extends MirrorConnectorConfig {
         return getShort(CHECKPOINTS_TOPIC_REPLICATION_FACTOR);
     }
 
-    GroupFilter groupFilter() {
+    public GroupFilter groupFilter() {
         return getConfiguredInstance(GROUP_FILTER_CLASS, GroupFilter.class);
     }
 
-    TopicFilter topicFilter() {
+    public TopicFilter topicFilter() {
         return getConfiguredInstance(TOPIC_FILTER_CLASS, TopicFilter.class);
     }
 

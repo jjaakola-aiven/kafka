@@ -67,8 +67,7 @@ public class OffsetSyncStore implements AutoCloseable {
     protected volatile boolean initializationMustReadToEnd = true;
     protected volatile boolean readToEnd = false;
 
-    // package access to avoid Java 21 "this-escape" warning
-    OffsetSyncStore(MirrorCheckpointConfig config) {
+    public OffsetSyncStore(final MirrorCheckpointConfig config) {
         Consumer<byte[], byte[]> consumer = null;
         TopicAdmin admin = null;
         KafkaBasedLog<byte[], byte[]> store;
@@ -170,7 +169,7 @@ public class OffsetSyncStore implements AutoCloseable {
         Utils.closeQuietly(admin, "admin client for offset syncs");
     }
 
-    protected void handleRecord(ConsumerRecord<byte[], byte[]> record) {
+    protected final void handleRecord(ConsumerRecord<byte[], byte[]> record) {
         OffsetSync offsetSync = OffsetSync.deserializeRecord(record);
         TopicPartition sourceTopicPartition = offsetSync.topicPartition();
         offsetSyncs.compute(sourceTopicPartition, (ignored, syncs) ->
@@ -307,7 +306,7 @@ public class OffsetSyncStore implements AutoCloseable {
         return iSync == jSync || (bound >= 0 && iSync.upstreamOffset() >= bound);
     }
 
-    private Optional<OffsetSync> latestOffsetSync(TopicPartition topicPartition, long upstreamOffset) {
+    public Optional<OffsetSync> latestOffsetSync(TopicPartition topicPartition, long upstreamOffset) {
         return Optional.ofNullable(offsetSyncs.get(topicPartition))
                 .map(syncs -> lookupLatestSync(syncs, upstreamOffset));
     }
